@@ -20,6 +20,14 @@
   </tr>
 </table>
 
+<table>
+  <tr>
+    <td align="center" style="background-color: #ffebee; color: #c6bb28; padding: 12px; border-radius: 6px;">
+      <strong>💡 Tips：预览 & 开发请点击dev.bat，日常使用请点击run.bat即可，但是未开发完善，不建议使用run.bat！</strong>
+    </td>
+  </tr>
+</table>
+
 ---
 
 ## 📖 介绍

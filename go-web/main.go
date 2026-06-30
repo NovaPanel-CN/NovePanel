@@ -3,7 +3,6 @@ package main
 import (
 	"encoding/json"
 	"fmt"
-	"io"
 	"log"
 	"net/http"
 	"os"
@@ -20,24 +19,25 @@ import (
 
 const (
 	HTTP_PORT = 8080
-	DAEMON_PORT = 8079
-)
-
-// ========== WebSocket 相关 ==========
-var (
-	clients   = make(map[*websocket.Conn]bool)
-	clientsMu sync.RWMutex
-	upgrader  = websocket.Upgrader{
-		CheckOrigin: func(r *http.Request) bool { return true },
-	}
-)
-
-var (
-	lastModMap = make(map[string]time.Time)
-	watcherMu  sync.Mutex
 )
 
 var projectRoot string
+
+// ========== 用户数据结构 ==========
+type User struct {
+	Username  string `json:"username"`
+	Password  string `json:"password"`
+	CreatedAt string `json:"createdAt"`
+}
+
+type UsersDB struct {
+	Users map[string]User `json:"users"`
+	mu    sync.RWMutex
+}
+
+var userDB = &UsersDB{
+	Users: make(map[string]User),
+}
 
 // ========== 系统信息结构 ==========
 type SysInfo struct {
@@ -121,189 +121,169 @@ var nodes = []Node{
 
 var nodesMu sync.RWMutex
 
-// ========== 主函数 ==========
+// ========== WebSocket 相关 ==========
+var (
+	clients   = make(map[*websocket.Conn]bool)
+	clientsMu sync.RWMutex
+	upgrader  = websocket.Upgrader{
+		CheckOrigin: func(r *http.Request) bool { return true },
+	}
+)
 
-func main() {
-	workDir, err := os.Getwd()
+var (
+	lastModMap = make(map[string]time.Time)
+	watcherMu  sync.Mutex
+)
+
+// ========== 用户数据持久化 ==========
+
+func getUserDataPath() string {
+	dir, err := os.Getwd()
 	if err != nil {
-		log.Printf("⚠️ 获取工作目录失败: %v", err)
-		workDir = "."
+		return "./go-daemon/data/users.json"
 	}
-
-	if filepath.Base(workDir) == "go-web" {
-		projectRoot = filepath.Dir(workDir)
-	} else {
-		projectRoot = workDir
-	}
-
-	log.Printf("📂 项目根目录: %s", projectRoot)
-
-	staticPath := filepath.Join(projectRoot, "go-web", "static")
-	if _, err := os.Stat(staticPath); os.IsNotExist(err) {
-		staticPath = filepath.Join(projectRoot, "static")
-		if _, err := os.Stat(staticPath); os.IsNotExist(err) {
-			log.Printf("⚠️ 找不到 static 目录！")
-			staticPath = "./static"
-		}
-	}
-	log.Printf("📂 静态文件目录: %s", staticPath)
-
-	fs := http.FileServer(http.Dir(staticPath))
-	http.Handle("/", fs)
-
-	http.HandleFunc("/ws", handleWebSocket)
-
-	// ===== 用户 API（代理到 Daemon） =====
-	http.HandleFunc("/api/register", proxyToDaemon)
-	http.HandleFunc("/api/login", proxyToDaemon)
-
-	// ===== 系统 API =====
-	http.HandleFunc("/api/status", handleStatus)
-	http.HandleFunc("/api/start", handleStart)
-	http.HandleFunc("/api/stop", handleStop)
-	http.HandleFunc("/api/logs", handleLogs)
-	http.HandleFunc("/api/sysinfo", handleSysInfo)
-
-	// ===== 节点管理 API =====
-	http.HandleFunc("/api/nodes", handleNodes)
-	http.HandleFunc("/api/node/add", handleNodeAdd)
-	http.HandleFunc("/api/node/delete", handleNodeDelete)
-	http.HandleFunc("/api/node/refresh", handleNodeRefresh)
-
-	// ===== 健康检查 =====
-	http.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
-		w.Write([]byte("ok"))
-	})
-
-	go startFileWatcher()
-	go startNodeMonitor()
-
-	addr := fmt.Sprintf(":%d", HTTP_PORT)
-	log.Printf("🚀 NovaPanel Web 启动于 http://127.0.0.1%s", addr)
-	log.Printf("🔌 WebSocket: ws://127.0.0.1%s/ws", addr)
-	log.Printf("🔗 Daemon 代理: http://127.0.0.1:%d", DAEMON_PORT)
-
-	if err := http.ListenAndServe(addr, nil); err != nil {
-		log.Fatal("启动失败:", err)
-	}
+	return filepath.Join(dir, "go-daemon", "data", "users.json")
 }
 
-// ========== 代理到 Daemon ==========
+func loadUserData() {
+	userDB.mu.Lock()
+	defer userDB.mu.Unlock()
 
-func proxyToDaemon(w http.ResponseWriter, r *http.Request) {
-	targetURL := fmt.Sprintf("http://127.0.0.1:%d%s", DAEMON_PORT, r.URL.Path)
+	path := getUserDataPath()
+	log.Printf("📂 用户数据路径: %s", path)
 
-	var body io.Reader
-	if r.Body != nil {
-		body = r.Body
-	}
+	os.MkdirAll(filepath.Dir(path), 0755)
 
-	proxyReq, err := http.NewRequest(r.Method, targetURL, body)
+	data, err := os.ReadFile(path)
 	if err != nil {
-		sendJSON(w, map[string]interface{}{"success": false, "message": "代理请求失败"})
-		return
-	}
-	proxyReq.Header.Set("Content-Type", "application/json")
-
-	client := &http.Client{}
-	resp, err := client.Do(proxyReq)
-	if err != nil {
-		sendJSON(w, map[string]interface{}{"success": false, "message": "连接 Daemon 失败: " + err.Error()})
-		return
-	}
-	defer resp.Body.Close()
-
-	// 复制响应
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(resp.StatusCode)
-	io.Copy(w, resp.Body)
-}
-
-// ========== 服务器状态 API ==========
-
-func handleStatus(w http.ResponseWriter, r *http.Request) {
-	serverState.mu.RLock()
-	defer serverState.mu.RUnlock()
-	uptime := time.Since(serverState.startTime)
-	resp := StatusResponse{
-		Running: serverState.running,
-		Memory:  serverState.memoryUsage,
-		Uptime:  formatUptime(uptime),
-		Players: 3,
-	}
-	sendJSON(w, resp)
-}
-
-func handleStart(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-	serverState.mu.Lock()
-	defer serverState.mu.Unlock()
-
-	if serverState.running {
-		sendJSON(w, ActionResponse{Success: false, Message: "服务已在运行中"})
-		return
-	}
-
-	var cmd *exec.Cmd
-	if runtime.GOOS == "windows" {
-		cmd = exec.Command("ping", "127.0.0.1", "-t")
-	} else {
-		cmd = exec.Command("sleep", "3600")
-	}
-
-	if err := cmd.Start(); err != nil {
-		sendJSON(w, ActionResponse{Success: false, Message: "启动失败: " + err.Error()})
-		return
-	}
-
-	serverState.cmd = cmd
-	serverState.running = true
-	serverState.startTime = time.Now()
-	go monitorMemory()
-
-	log.Println("✅ 服务已启动 (PID:", cmd.Process.Pid, ")")
-	sendJSON(w, ActionResponse{Success: true, Message: "服务启动成功"})
-}
-
-func handleStop(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-	serverState.mu.Lock()
-	defer serverState.mu.Unlock()
-
-	if !serverState.running {
-		sendJSON(w, ActionResponse{Success: false, Message: "服务未运行"})
-		return
-	}
-
-	if serverState.cmd != nil && serverState.cmd.Process != nil {
-		if err := serverState.cmd.Process.Kill(); err != nil {
-			sendJSON(w, ActionResponse{Success: false, Message: "停止失败: " + err.Error()})
+		if os.IsNotExist(err) {
+			log.Println("📝 用户数据文件不存在，将创建新文件")
+			userDB.Users = make(map[string]User)
+			saveUserDataLocked()
 			return
 		}
+		log.Printf("⚠️ 读取用户数据失败: %v", err)
+		userDB.Users = make(map[string]User)
+		return
 	}
 
-	serverState.running = false
-	serverState.cmd = nil
-	serverState.memoryUsage = 0
+	var loaded UsersDB
+	if err := json.Unmarshal(data, &loaded); err != nil {
+		log.Printf("⚠️ 解析用户数据失败: %v", err)
+		userDB.Users = make(map[string]User)
+		return
+	}
 
-	log.Println("⏹️ 服务已停止")
-	sendJSON(w, ActionResponse{Success: true, Message: "服务已停止"})
+	if loaded.Users == nil {
+		loaded.Users = make(map[string]User)
+	}
+	userDB.Users = loaded.Users
+	log.Printf("✅ 加载了 %d 个用户", len(userDB.Users))
 }
 
-func handleLogs(w http.ResponseWriter, r *http.Request) {
+func saveUserDataLocked() {
+	path := getUserDataPath()
+	os.MkdirAll(filepath.Dir(path), 0755)
+
+	data, err := json.MarshalIndent(userDB, "", "  ")
+	if err != nil {
+		log.Printf("⚠️ 序列化用户数据失败: %v", err)
+		return
+	}
+
+	if err := os.WriteFile(path, data, 0644); err != nil {
+		log.Printf("⚠️ 保存用户数据失败: %v", err)
+		return
+	}
+	log.Printf("💾 用户数据已保存到 %s", path)
+}
+
+// ========== 用户 API ==========
+
+func handleRegister(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var req struct {
+		Username string `json:"username"`
+		Password string `json:"password"`
+	}
+
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		sendJSON(w, map[string]interface{}{"success": false, "message": "参数解析失败"})
+		return
+	}
+
+	if req.Username == "" || req.Password == "" {
+		sendJSON(w, map[string]interface{}{"success": false, "message": "账号和密码不能为空"})
+		return
+	}
+
+	userDB.mu.Lock()
+	defer userDB.mu.Unlock()
+
+	if _, exists := userDB.Users[req.Username]; exists {
+		sendJSON(w, map[string]interface{}{"success": false, "message": "账号已存在"})
+		return
+	}
+
+	userDB.Users[req.Username] = User{
+		Username:  req.Username,
+		Password:  req.Password,
+		CreatedAt: time.Now().Format("2006-01-02 15:04:05"),
+	}
+	saveUserDataLocked()
+
+	log.Printf("✅ 新用户注册: %s", req.Username)
 	sendJSON(w, map[string]interface{}{
-		"logs": []string{
-			"[14:32:01] 服务器启动",
-			"[14:32:05] 玩家 Steve 加入游戏",
-			"[14:35:12] 玩家 Alex 加入游戏",
-			"[14:40:33] 服务器保存中...",
-			"[14:45:20] 玩家 Herobrine 加入了游戏 😱",
+		"success": true,
+		"message": "注册成功",
+		"user": map[string]string{
+			"username":  req.Username,
+			"createdAt": userDB.Users[req.Username].CreatedAt,
+		},
+	})
+}
+
+func handleLogin(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var req struct {
+		Username string `json:"username"`
+		Password string `json:"password"`
+	}
+
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		sendJSON(w, map[string]interface{}{"success": false, "message": "参数解析失败"})
+		return
+	}
+
+	userDB.mu.RLock()
+	defer userDB.mu.RUnlock()
+
+	user, exists := userDB.Users[req.Username]
+	if !exists {
+		sendJSON(w, map[string]interface{}{"success": false, "message": "账号不存在"})
+		return
+	}
+
+	if user.Password != req.Password {
+		sendJSON(w, map[string]interface{}{"success": false, "message": "密码错误"})
+		return
+	}
+
+	log.Printf("✅ 用户登录: %s", req.Username)
+	sendJSON(w, map[string]interface{}{
+		"success": true,
+		"message": "登录成功",
+		"user": map[string]string{
+			"username":  req.Username,
+			"createdAt": user.CreatedAt,
 		},
 	})
 }
@@ -376,32 +356,66 @@ func getCPUUsage() float64 {
 	return float64(10 + time.Now().Unix()%20)
 }
 
+// ========== 内存信息 ==========
+// Windows: 使用 PowerShell 获取 Win32_OperatingSystem
+//   - TotalVisibleMemorySize 和 FreePhysicalMemory 均返回 KB
+// Linux:   读取 /proc/meminfo
 func getMemoryInfo() (total, used, percent float64) {
 	if runtime.GOOS == "windows" {
+		// 方法1: PowerShell（推荐；wmic 在新版 Windows 中已弃用）
+		// 一次调用同时获取 TotalVisibleMemorySize 和 FreePhysicalMemory（单位均为 KB）
 		cmd := exec.Command("powershell", "-Command",
-			"Get-CimInstance Win32_ComputerSystem | Select-Object -ExpandProperty TotalPhysicalMemory")
+			"Get-CimInstance Win32_OperatingSystem | ForEach-Object { $_.TotalVisibleMemorySize; $_.FreePhysicalMemory }")
 		out, err := cmd.Output()
 		if err == nil {
-			totalBytes, err := strconv.ParseFloat(strings.TrimSpace(string(out)), 64)
-			if err == nil && totalBytes > 0 {
-				total = totalBytes / 1024 / 1024 / 1024
+			lines := strings.Fields(strings.TrimSpace(string(out)))
+			if len(lines) >= 2 {
+				totalKB, err1 := strconv.ParseFloat(lines[0], 64)
+				freeKB, err2 := strconv.ParseFloat(lines[1], 64)
+				if err1 == nil && err2 == nil && totalKB > 0 {
+					total = totalKB / 1024 / 1024 // KB → GB
+					used = (totalKB - freeKB) / 1024 / 1024
+					if used < 0 {
+						used = 0
+					}
+					percent = (used / total) * 100
+					log.Printf("📊 PowerShell 内存数据: 总计=%.2fGB, 已用=%.2fGB, 使用率=%.1f%%", total, used, percent)
+					return total, used, percent
+				}
 			}
 		}
-		cmd = exec.Command("powershell", "-Command",
-			"Get-CimInstance Win32_OperatingSystem | Select-Object -ExpandProperty FreePhysicalMemory")
+
+		// 方法2: wmic 备用
+		// 注意: wmic 输出列按字母顺序排列，即 "FreePhysicalMemory  TotalVisibleMemorySize"
+		// 因此 fields[0] 是 FreePhysicalMemory，fields[1] 是 TotalVisibleMemorySize
+		cmd = exec.Command("wmic", "OS", "get", "FreePhysicalMemory,TotalVisibleMemorySize")
 		out, err = cmd.Output()
 		if err == nil {
-			freeMB, err := strconv.ParseFloat(strings.TrimSpace(string(out)), 64)
-			if err == nil && freeMB > 0 && total > 0 {
-				used = total - (freeMB / 1024)
-				if used < 0 {
-					used = 0
+			lines := strings.Split(string(out), "\n")
+			for _, line := range lines {
+				line = strings.TrimSpace(line)
+				if line == "" || strings.Contains(line, "FreePhysicalMemory") {
+					continue
 				}
-				percent = (used / total) * 100
-				return
+				fields := strings.Fields(line)
+				if len(fields) >= 2 {
+					freeKB, err1 := strconv.ParseFloat(fields[0], 64)
+					totalKB, err2 := strconv.ParseFloat(fields[1], 64)
+					if err1 == nil && err2 == nil && totalKB > 0 {
+						total = totalKB / 1024 / 1024
+						used = (totalKB - freeKB) / 1024 / 1024
+						if used < 0 {
+							used = 0
+						}
+						percent = (used / total) * 100
+						log.Printf("📊 wmic 内存数据: 总计=%.2fGB, 已用=%.2fGB, 使用率=%.1f%%", total, used, percent)
+						return total, used, percent
+					}
+				}
 			}
 		}
 	} else {
+		// Linux
 		data, err := os.ReadFile("/proc/meminfo")
 		if err == nil {
 			lines := strings.Split(string(data), "\n")
@@ -427,10 +441,11 @@ func getMemoryInfo() (total, used, percent float64) {
 					used = 0
 				}
 				percent = (used / total) * 100
-				return
+				return total, used, percent
 			}
 		}
 	}
+
 	if total <= 0 {
 		total = 16.0
 	}
@@ -439,7 +454,8 @@ func getMemoryInfo() (total, used, percent float64) {
 		used = total * 0.8
 	}
 	percent = (used / total) * 100
-	return
+	log.Printf("📊 内存数据 (默认): 总计=%.2fGB, 已用=%.2fGB, 使用率=%.1f%%", total, used, percent)
+	return total, used, percent
 }
 
 func getDiskInfo() (total, used, percent float64) {
@@ -713,7 +729,7 @@ func handleNodeRefresh(w http.ResponseWriter, r *http.Request) {
 	sendJSON(w, map[string]interface{}{"success": true, "message": "刷新中..."})
 }
 
-// ========== 连接节点（修复并发写入） ==========
+// ========== 连接节点 ==========
 
 func connectToNode(node Node) {
 	wsAddr := fmt.Sprintf("ws://%s:%d/ws", node.IP, node.Port)
@@ -768,16 +784,31 @@ func connectToNode(node Node) {
 		}
 
 		if data, ok := resp["data"].(map[string]interface{}); ok {
-			cpu, _ := data["cpuUsage"].(float64)
-			memTotal, _ := data["memTotal"].(float64)
-			memUsed, _ := data["memUsed"].(float64)
-			memPercent, _ := data["memPercent"].(float64)
+			cpu := 0.0
+			if v, ok := data["cpuUsage"].(float64); ok {
+				cpu = v
+			}
 
-			if memTotal <= 0 {
-				memTotal = 16.0
-				memUsed = 2.1
+			memTotal := 16.0
+			memUsed := 0.0
+			memPercent := 0.0
+
+			if v, ok := data["memTotal"].(float64); ok && v > 0 {
+				memTotal = v
+			}
+			if v, ok := data["memUsed"].(float64); ok && v > 0 {
+				memUsed = v
+			}
+			if v, ok := data["memPercent"].(float64); ok && v > 0 {
+				memPercent = v
+			}
+
+			if memUsed <= 0 && memTotal > 0 {
+				memUsed = memTotal * 0.13
 				memPercent = 13.0
 			}
+
+			log.Printf("📊 节点 %s 内存: 总计=%.2fGB, 已用=%.2fGB, 使用率=%.1f%%", node.Name, memTotal, memUsed, memPercent)
 
 			updateNodeStatus(node.ID, "online", cpu, memUsed, memTotal, memPercent, -1, -1)
 		}
@@ -869,6 +900,95 @@ func startNodeMonitor() {
 			}
 		}
 	}
+}
+
+// ========== 服务器状态 API ==========
+
+func handleStatus(w http.ResponseWriter, r *http.Request) {
+	serverState.mu.RLock()
+	defer serverState.mu.RUnlock()
+	uptime := time.Since(serverState.startTime)
+	resp := StatusResponse{
+		Running: serverState.running,
+		Memory:  serverState.memoryUsage,
+		Uptime:  formatUptime(uptime),
+		Players: 3,
+	}
+	sendJSON(w, resp)
+}
+
+func handleStart(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	serverState.mu.Lock()
+	defer serverState.mu.Unlock()
+
+	if serverState.running {
+		sendJSON(w, ActionResponse{Success: false, Message: "服务已在运行中"})
+		return
+	}
+
+	var cmd *exec.Cmd
+	if runtime.GOOS == "windows" {
+		cmd = exec.Command("ping", "127.0.0.1", "-t")
+	} else {
+		cmd = exec.Command("sleep", "3600")
+	}
+
+	if err := cmd.Start(); err != nil {
+		sendJSON(w, ActionResponse{Success: false, Message: "启动失败: " + err.Error()})
+		return
+	}
+
+	serverState.cmd = cmd
+	serverState.running = true
+	serverState.startTime = time.Now()
+	go monitorMemory()
+
+	log.Println("✅ 服务已启动 (PID:", cmd.Process.Pid, ")")
+	sendJSON(w, ActionResponse{Success: true, Message: "服务启动成功"})
+}
+
+func handleStop(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	serverState.mu.Lock()
+	defer serverState.mu.Unlock()
+
+	if !serverState.running {
+		sendJSON(w, ActionResponse{Success: false, Message: "服务未运行"})
+		return
+	}
+
+	if serverState.cmd != nil && serverState.cmd.Process != nil {
+		if err := serverState.cmd.Process.Kill(); err != nil {
+			sendJSON(w, ActionResponse{Success: false, Message: "停止失败: " + err.Error()})
+			return
+		}
+	}
+
+	serverState.running = false
+	serverState.cmd = nil
+	serverState.memoryUsage = 0
+
+	log.Println("⏹️ 服务已停止")
+	sendJSON(w, ActionResponse{Success: true, Message: "服务已停止"})
+}
+
+func handleLogs(w http.ResponseWriter, r *http.Request) {
+	sendJSON(w, map[string]interface{}{
+		"logs": []string{
+			"[14:32:01] 服务器启动",
+			"[14:32:05] 玩家 Steve 加入游戏",
+			"[14:35:12] 玩家 Alex 加入游戏",
+			"[14:40:33] 服务器保存中...",
+			"[14:45:20] 玩家 Herobrine 加入了游戏 😱",
+		},
+	})
 }
 
 // ========== 辅助函数 ==========
@@ -989,5 +1109,69 @@ func startFileWatcher() {
 		if changed {
 			notifyReload()
 		}
+	}
+}
+
+// ========== 主函数 ==========
+
+func main() {
+	loadUserData()
+
+	workDir, err := os.Getwd()
+	if err != nil {
+		log.Printf("⚠️ 获取工作目录失败: %v", err)
+		workDir = "."
+	}
+
+	if filepath.Base(workDir) == "go-web" {
+		projectRoot = filepath.Dir(workDir)
+	} else {
+		projectRoot = workDir
+	}
+
+	log.Printf("📂 项目根目录: %s", projectRoot)
+
+	staticPath := filepath.Join(projectRoot, "go-web", "static")
+	if _, err := os.Stat(staticPath); os.IsNotExist(err) {
+		staticPath = filepath.Join(projectRoot, "static")
+		if _, err := os.Stat(staticPath); os.IsNotExist(err) {
+			log.Printf("⚠️ 找不到 static 目录！")
+			staticPath = "./static"
+		}
+	}
+	log.Printf("📂 静态文件目录: %s", staticPath)
+
+	fs := http.FileServer(http.Dir(staticPath))
+	http.Handle("/", fs)
+
+	http.HandleFunc("/ws", handleWebSocket)
+
+	http.HandleFunc("/api/register", handleRegister)
+	http.HandleFunc("/api/login", handleLogin)
+
+	http.HandleFunc("/api/status", handleStatus)
+	http.HandleFunc("/api/start", handleStart)
+	http.HandleFunc("/api/stop", handleStop)
+	http.HandleFunc("/api/logs", handleLogs)
+	http.HandleFunc("/api/sysinfo", handleSysInfo)
+
+	http.HandleFunc("/api/nodes", handleNodes)
+	http.HandleFunc("/api/node/add", handleNodeAdd)
+	http.HandleFunc("/api/node/delete", handleNodeDelete)
+	http.HandleFunc("/api/node/refresh", handleNodeRefresh)
+
+	http.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte("ok"))
+	})
+
+	go startFileWatcher()
+	go startNodeMonitor()
+
+	addr := fmt.Sprintf(":%d", HTTP_PORT)
+	log.Printf("🚀 NovaPanel Web 启动于 http://127.0.0.1%s", addr)
+	log.Printf("🔌 WebSocket: ws://127.0.0.1%s/ws", addr)
+
+	if err := http.ListenAndServe(addr, nil); err != nil {
+		log.Fatal("启动失败:", err)
 	}
 }

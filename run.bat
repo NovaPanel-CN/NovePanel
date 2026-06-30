@@ -1,13 +1,13 @@
 @echo off
 chcp 65001 >nul
-title NovaPanel 开发模式
+title NovaPanel 运行
 
 set NOVAPANEL_ROOT=%~dp0
 set NODE_BIN=%NOVAPANEL_ROOT%tools\node
 set PATH=%NODE_BIN%;%PATH%
 
 echo ========================================
-echo   NovaPanel 开发模式
+echo   NovaPanel 运行
 echo   Go Web 前端: 8080
 echo   Vue 后端: 8079
 echo   Go Daemon: 8078
@@ -39,7 +39,7 @@ echo [检查] Node.js 版本:
 "%NODE_BIN%\node.exe" -v
 echo.
 
-:: 安装 Vue 依赖
+:: 安装 Vue 依赖（首次运行）
 if not exist "%NOVAPANEL_ROOT%vue-backend\node_modules" (
     echo [安装] 首次运行，安装 Vue 后端依赖...
     cd /d "%NOVAPANEL_ROOT%vue-backend"
@@ -70,7 +70,7 @@ start "" "http://127.0.0.1:8080"
 
 echo.
 echo ========================================
-echo   开发环境启动完成！
+echo   启动完成！
 echo   Go Web 前端: http://127.0.0.1:8080
 echo   Vue 后端: http://127.0.0.1:8079
 echo   Go Daemon: http://127.0.0.1:8078
