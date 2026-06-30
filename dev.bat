@@ -1,79 +1,79 @@
 @echo off
-title NovaPanel 开发模式
+title NovaPanel Dev
 
 set NOVAPANEL_ROOT=%~dp0
 set NODE_BIN=%NOVAPANEL_ROOT%tools\node
 set PATH=%NODE_BIN%;%PATH%
 
 echo ========================================
-echo   NovaPanel 开发模式
-echo   Go Web 前端: 8080
-echo   Vue 后端: 8079
-echo   Go Daemon: 8078
-echo   用户数据: go-daemon\data\
+echo   NovaPanel Dev Mode
+echo   Go Web:  8080
+echo   Vue API: 8079
+echo   Daemon:  8078
+echo   Data:    go-daemon\data\
 echo ========================================
 echo.
 
-:: 检查系统 Go
+:: Check Go
 where go >nul 2>nul
 if errorlevel 1 (
-    echo [错误] 未找到系统 Go！
-    echo 请安装 Go: https://golang.google.cn/dl/
+    echo [Error] Go not found!
+    echo Install from: https://golang.google.cn/dl/
     pause
     exit /b 1
 )
 
-:: 检查 Node.js
+:: Check Node.js
 if not exist "%NODE_BIN%\node.exe" (
-    echo [错误] 未找到内置 Node.js！
+    echo [Error] Node.js not found!
     pause
     exit /b 1
 )
 
-echo [检查] Go 版本:
+echo [Check] Go version:
 go version
 echo.
 
-echo [检查] Node.js 版本:
+echo [Check] Node.js version:
 "%NODE_BIN%\node.exe" -v
 echo.
 
-:: 安装 Vue 依赖
+:: Install Vue deps
 if not exist "%NOVAPANEL_ROOT%vue-backend\node_modules" (
-    echo [安装] 首次运行，安装 Vue 后端依赖...
+    echo [Install] First run, installing Vue backend deps...
     cd /d "%NOVAPANEL_ROOT%vue-backend"
     call "%NODE_BIN%\npm.cmd" install
     cd /d "%NOVAPANEL_ROOT%"
     echo.
 )
 
-:: 启动服务
-echo [1/4] 安装 Go 依赖...
+:: Start services
+echo [1/4] Tidying Go deps...
 cd /d "%NOVAPANEL_ROOT%"
 go mod tidy
 echo.
 
-echo [2/4] 启动 Go Daemon（远程节点 :8078）...
-start "NovaPanel Daemon" cmd /k "chcp 65001 >nul && cd /d %NOVAPANEL_ROOT%go-daemon && go run main.go"
+echo [2/4] Starting Go Daemon (:8078)...
+start "NovaPanel Daemon" cmd /k "cd /d %NOVAPANEL_ROOT%go-daemon && go run main.go"
 timeout /t 2 >nul
 
-echo [3/4] 启动 Vue 后端（API :8079）...
-start "NovaPanel Vue API" cmd /c "chcp 65001 >nul && cd /d %NOVAPANEL_ROOT%vue-backend && node server.js"
+echo [3/4] Starting Vue API (:8079)...
+start "NovaPanel Vue API" cmd /c "cd /d %NOVAPANEL_ROOT%vue-backend && node server.js"
 timeout /t 2 >nul
 
-echo [4/4] 启动 Go Web 前端（面板 :8080）...
-start "NovaPanel Web" cmd /c "chcp 65001 >nul && cd /d %NOVAPANEL_ROOT% && go run ./go-web/main.go"
+echo [4/4] Starting Go Web (:8080)...
+start "NovaPanel Web" cmd /c "cd /d %NOVAPANEL_ROOT% && go run ./go-web/main.go"
 timeout /t 2 >nul
 
 start "" "http://127.0.0.1:8080"
 
 echo.
 echo ========================================
-echo   开发环境启动完成！
-echo   Go Web 前端: http://127.0.0.1:8080
-echo   Vue 后端: http://127.0.0.1:8079
-echo   Go Daemon: http://127.0.0.1:8078
-echo   用户数据: %NOVAPANEL_ROOT%go-daemon\data\users.json
+echo   Dev started!
+echo   Go Web:  http://127.0.0.1:8080
+echo   Vue API: http://127.0.0.1:8079
+echo   Daemon:  http://127.0.0.1:8078
+echo   Users:   %NOVAPANEL_ROOT%go-daemon\data\users.json
 echo ========================================
 pause >nul
 exit
