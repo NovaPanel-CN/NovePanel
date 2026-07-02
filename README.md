@@ -102,7 +102,7 @@ NovaPanel 致力于提供**轻量、高效、开箱即用**的管理体验，无
 ### 下载与启动
 
 ```bash
-# 克隆项目
+# 克隆项目（需要先Fork本仓库）
 git clone https://github.com/你的用户名/NovaPanel.git
 cd NovaPanel
 
