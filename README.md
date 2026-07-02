@@ -40,7 +40,7 @@
 <table>
   <tr>
     <td align="center" style="background-color: #ffebee; color: #c62828; padding: 12px; border-radius: 6px;">
-      <strong>⚠️ 注意：本项目目前为开发早期（alpha），仍在积极开发中，部分功能可能不完善，欢迎反馈！</strong>
+      <strong>⚠️ 注意：本项目目前为开发早期（alpha），仍在积极开发中，部分功能可能不完善，欢迎提交issue进行反馈！</strong>
     </td>
   </tr>
 </table>
@@ -70,7 +70,7 @@ NovaPanel 致力于提供**轻量、高效、开箱即用**的管理体验，无
 - 🔌 **分布式架构** - 支持远程节点管理，可横向扩展
 - 🎮 **Minecraft 支持** - 专为 Minecraft 服务器优化
 - 🌐 **跨平台支持** - 支持 Windows / Linux
-- 🌐 **远程节点跨平台支持** - 支持 NovaPanel /MCSManager
+- 🌐 **远程节点跨平台支持** - 支持 NovaPanel /MCSManager 格式的守护进程
 - 🔥 **热重载开发** - 修改代码自动刷新，开发体验流畅
 - 📊 **实时监控** - 系统信息总览，CPU/内存/磁盘实时监控
 - 🔐 **安全认证** - 账号密码登录，保障面板安全
